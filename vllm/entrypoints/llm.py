@@ -269,103 +269,6 @@ class LLM:
             return SamplingParams.from_optional(**self.default_sampling_params)
         return SamplingParams()
 
-    @overload
-    def generate(
-        self,
-        prompts: Union[PromptType, Sequence[PromptType]],
-        /,
-        sampling_params: Optional[Union[SamplingParams,
-                                        Sequence[SamplingParams]]] = None,
-        *,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: single (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: str,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        prompt_token_ids: Optional[list[int]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: multi (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: list[str],
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        prompt_token_ids: Optional[list[list[int]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: single (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: Optional[str] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        *,
-        prompt_token_ids: list[int],
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: multi (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: Optional[list[str]] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        *,
-        prompt_token_ids: list[list[int]],
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: single or multi token ids [pos-only]
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: None,
-        sampling_params: None,
-        prompt_token_ids: Union[list[int], list[list[int]]],
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
     @deprecate_kwargs(
         "prompt_token_ids",
         is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
@@ -373,6 +276,11 @@ class LLM:
     )
     def generate(
         self,
+        cot_token_ids: Optional[list[int]] = None,
+        okay_token_ids: Optional[list[list[int]]] = None,
+        summary_token_ids: Optional[list[int]] = None,
+        parthink_size: int = -1,
+        pad_token_id: int = -1,
         prompts: Union[Union[PromptType, Sequence[PromptType]],
                        Optional[Union[str, list[str]]]] = None,
         sampling_params: Optional[Union[SamplingParams,
@@ -462,6 +370,11 @@ class LLM:
             guided_options=guided_options_request,
             priority=priority)
 
+        self.llm_engine.cot_token_ids = cot_token_ids
+        self.llm_engine.okay_token_ids = okay_token_ids
+        self.llm_engine.summary_token_ids = summary_token_ids
+        self.llm_engine.parthink_size = parthink_size
+        self.llm_engine.pad_token_id = pad_token_id
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 

@@ -1755,9 +1755,9 @@ class EngineArgs:
                 "models in V0 and has been disabled.")
             self.enable_prefix_caching = False
 
-        # Set max_num_seqs to 256 for VLLM_V0.
+        # Set max_num_seqs to 1024 for VLLM_V0.
         if self.max_num_seqs is None:
-            self.max_num_seqs = 256
+            self.max_num_seqs = 1024
 
     def _set_default_args_v1(self, usage_context: UsageContext) -> None:
         """Set Default Arguments for V1 Engine."""

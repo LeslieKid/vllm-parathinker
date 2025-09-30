@@ -340,6 +340,45 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         # Track child seq
         self._last_access_blocks_tracker.add_seq(child_seq.seq_id)
+        
+    def combine_seqs(self, seq_group: SequenceGroup, child_seq: Sequence) -> None:
+        """Construct BlockTable for summarization phase by concat KV caches of all parallel reasoning paths."""
+        prompt_len = child_seq.get_prompt_len()
+        parent_seqs_len: List[int] = []
+        bt_group: List[BlockTable] = []
+        for parent_seq in seq_group.seqs:
+            if parent_seq.seq_id not in self.block_tables:
+                raise RuntimeError(f"Parent sequence with id {parent_seq.seq_id} is not in BlockTable")
+            src_block_table = self.block_tables[parent_seq.seq_id]
+            bt_group.append(src_block_table)
+            parent_seqs_len.append(parent_seq.get_len())
+        # Concatenate multiple BlockTable instances into a single BlockTable
+        block_size = bt_group[0]._block_size
+        max_block_sliding_window = bt_group[0]._max_block_sliding_window
+        allocator = bt_group[0]._allocator
+        
+        forked_blocks: List[Block] = []
+        # Collect prompt token IDs and first CoT token IDs
+        src_start_idx = 0
+        src_end_idx = parent_seqs_len[0]
+        forked_blocks.extend(bt_group[0].fork_with_indices(src_start_idx, src_end_idx))
+        # Collect token IDs of multiple CoTs in parallel thinking (except CoT#1, which is already collected)
+        for (idx, bt) in enumerate(bt_group):
+            if idx == 0:
+                continue
+            src_start_idx = prompt_len
+            src_end_idx = parent_seqs_len[idx]
+            forked_blocks.extend(bt.fork_with_indices(src_start_idx, src_end_idx))
+        
+        new_block_table = BlockTable(
+            block_size=block_size,
+            block_allocator=allocator,
+            _blocks=forked_blocks,
+            max_block_sliding_window=max_block_sliding_window
+        )
+        self.block_tables[child_seq.seq_id] = new_block_table
+        # Track child seq
+        self._last_access_blocks_tracker.add_seq(child_seq.seq_id)
 
     def can_swap_in(self, seq_group: SequenceGroup,
                     num_lookahead_slots: int) -> AllocStatus:

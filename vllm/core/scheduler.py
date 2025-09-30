@@ -504,7 +504,8 @@ class Scheduler:
         # iterations. I.e. since the output processing is lagged one step,
         # we cannot reuse the cached objects immediately when the schedule()
         # is called again, but only when schedule() is called the second time.
-        self.output_proc_callback = output_proc_callback
+        # Disable async output processing
+        self.output_proc_callback = None
         self.use_async_output_proc = self.output_proc_callback is not None
         self.num_cache_iters = 2 if self.use_async_output_proc else 1
 
@@ -1651,6 +1652,10 @@ class Scheduler:
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         self.block_manager.fork(parent_seq, child_seq)
+        
+    def combine_seqs(self, seq_group: SequenceGroup, seq: Sequence) -> None:
+        """Concatenate multiple sequences into a single one from block tables."""
+        self.block_manager.combine_seqs(seq_group, seq)
 
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
@@ -1658,9 +1663,19 @@ class Scheduler:
 
     def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:
         """Free finished seqs in a sequence group."""
-        for seq in seq_group.get_seqs():
-            if seq.is_finished():
-                self.free_seq(seq)
+        # Check if the whole group is finished or not during parallel thinking stage
+        is_group_finished = True
+        min_parthink_size = 2
+        if len(seq_group.seqs) >= min_parthink_size:
+            for seq in seq_group.seqs:
+                if not seq.is_finished():
+                    is_group_finished = False
+                    break
+                
+        if is_group_finished:
+            for seq in seq_group.get_seqs():
+                if seq.is_finished():
+                    self.free_seq(seq)
 
     def _free_finished_seq_group(self, seq_group: SequenceGroup) -> None:
         if seq_group.is_finished():

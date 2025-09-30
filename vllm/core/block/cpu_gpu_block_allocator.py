@@ -225,6 +225,13 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         assert block_id is not None
         allocator = self._block_ids_to_allocator[block_id]
         return allocator.fork(last_block)
+    
+    def fork_with_indices(self, last_block: Block, start_block_idx: int, end_block_idx: int) -> List[Block]:
+        assert not isinstance(last_block, NullBlock)
+        block_id = last_block.block_id
+        assert block_id is not None
+        allocator = self._block_ids_to_allocator[block_id]
+        return allocator.fork_with_indices(last_block, start_block_idx, end_block_idx)
 
     def get_num_free_blocks(self, device: Device) -> int:
         """Returns the number of free blocks available on the specified device.

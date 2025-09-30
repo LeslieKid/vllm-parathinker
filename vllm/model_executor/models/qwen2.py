@@ -110,7 +110,8 @@ class Qwen2Attention(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  rope_scaling: Optional[Tuple] = None,
                  prefix: str = "",
-                 attn_type: str = AttentionType.DECODER) -> None:
+                 attn_type: str = AttentionType.DECODER,
+                 max_segments: int = 32) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -132,6 +133,10 @@ class Qwen2Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
+        
+        # Introduce and initialize segment embeddings
+        self.seg_embeddings = nn.Embedding(max_segments, self.head_dim)
+        nn.init.zeros_(self.seg_embeddings.weight)
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -170,9 +175,42 @@ class Qwen2Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        seg_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        
+        # Apply segment embeddings to k and v before rotary embeddings (thought-specific positional embedding)
+        if seg_ids is not None:
+            total_tokens = hidden_states.shape[0]
+            
+            # Handle different seg_ids shapes and ensure alignment
+            if seg_ids.dim() == 2:
+                # If seg_ids has shape [batch_size, seq_len], extract relevant segment IDs
+                # This is a simplified approach - you may need to adjust based on your actual seg_ids format
+                raise ValueError("segment ids should be 1D")
+            else:
+                seg_ids_1d = seg_ids
+            
+            assert seg_ids_1d.shape[0] == total_tokens
+            if seg_ids_1d.shape[0] > total_tokens:
+                seg_ids_1d = seg_ids_1d[:total_tokens]
+            
+            seg_emb = self.seg_embeddings(seg_ids_1d)
+            
+            # Reshape k, v to apply segment embeddings
+            k = k.view(total_tokens, self.num_kv_heads, self.head_dim)
+            v = v.view(total_tokens, self.num_kv_heads, self.head_dim)
+            
+            # Add segment embeddings (broadcast across heads)
+            seg_emb = seg_emb.unsqueeze(1)
+            k = k + seg_emb
+            v = v + seg_emb
+            
+            # Reshape back to original format
+            k = k.view(total_tokens, self.kv_size)
+            v = v.view(total_tokens, self.kv_size)
+        
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -193,6 +231,7 @@ class Qwen2DecoderLayer(nn.Module):
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
+        max_segments = getattr(config, "max_segments", 32)
 
         # By default, Qwen2 uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
@@ -214,6 +253,7 @@ class Qwen2DecoderLayer(nn.Module):
             rope_scaling=rope_scaling,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
+            max_segments=max_segments
         )
         self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
@@ -232,6 +272,7 @@ class Qwen2DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
+        seg_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -243,6 +284,7 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
+            seg_ids = seg_ids
         )
 
         # Fully Connected
@@ -323,6 +365,7 @@ class Qwen2Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        seg_ids: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -339,6 +382,7 @@ class Qwen2Model(nn.Module):
                 positions,
                 hidden_states,
                 residual,
+                seg_ids,
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -393,7 +437,9 @@ class Qwen2Model(nn.Module):
                     continue
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                # Mention(syf) Load useless segment embeddings in Qwen2Model module in SFT stage
+                if name is None or name == "seg_embeddings.weight":
+                    raise RuntimeError("Unreachable code reaches")
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -458,9 +504,10 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        seg_ids: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+                                   inputs_embeds, seg_ids)
         return hidden_states
 
     def compute_logits(

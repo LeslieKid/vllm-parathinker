@@ -76,7 +76,14 @@ class Worker(LocalOrDistributedWorkerBase):
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_config.runner_type == "pooling":
-            ModelRunnerClass = PoolingModelRunner
+            # TODO(syf) Complete custom logic: Check if this is Qwen2 with token_types for segment IDs
+            if "qwen" in model_config.model.lower():
+                # Force generation runner for Qwen2 with custom token_types usage
+                # `token_types` is useless originally in ParaThinker. Thus, we regard it as `seg_ids` for convenience.
+                print("Force generation runner for Qwen2 with custom token_types usage")
+                ModelRunnerClass = ModelRunner
+            else:
+                ModelRunnerClass = PoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(

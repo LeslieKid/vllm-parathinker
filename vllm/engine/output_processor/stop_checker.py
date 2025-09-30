@@ -33,6 +33,7 @@ class StopChecker:
         new_char_count: int,
         sampling_params: SamplingParams,
         lora_req: Optional[LoRARequest] = None,
+        is_summary_stage: bool = False,
     ) -> None:
         """Stop the finished sequences.
 
@@ -50,6 +51,7 @@ class StopChecker:
                 and seq.get_last_token_id() == seq.eos_token_id):
             # Remove the last EOS token unless explicitly specified
             # This prevents unintended exposure of the EOS token
+            raise ValueError("Unreachable code reached -- ignore_eos should be True")
             if new_char_count and (
                     not sampling_params.include_stop_str_in_output):
                 seq.output_text = seq.output_text[:-new_char_count]
@@ -59,20 +61,38 @@ class StopChecker:
         # Check if a stop token was encountered.
         # This assumes a single token produced per step.
         last_token_id = seq.get_last_token_id()
+        summary_token_id = 151681 # token id for `<summary>`, which is the sign for start of summary stage
+        summary_end_token_id = summary_token_id + 1 # token id for `</summary>`
         if last_token_id in (sampling_params.stop_token_ids or ()):
             if new_char_count and (
                     not sampling_params.include_stop_str_in_output):
                 # Remove last token
                 seq.output_text = seq.output_text[:-new_char_count]
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            seq.stop_reason = last_token_id
+            if is_summary_stage:
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                seq.data._output_token_ids[-1] = summary_end_token_id
+                seq.data._new_appended_tokens[-1] = summary_end_token_id
+                seq.data._cached_all_token_ids[-1] = summary_end_token_id
+                seq.stop_reason = summary_end_token_id
+            elif len(seq.get_output_token_ids()) % seq.block_size == 0:
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                seq.stop_reason = last_token_id
+            else:
+                seq.is_padding = True
             return
+    
+        # TODO(syf) Add a description for why `is_padding` is necessary when using PagedAttention for ParaThinker
+        if seq.is_padding and (len(seq.get_output_token_ids()) % seq.block_size == 0):
+            seq.status = SequenceStatus.FINISHED_STOPPED
+            seq.is_padding = False
+            seq.stop_reason = last_token_id
 
         # Check if any stop strings are matched.
         stop = self.check_stop_strings(
             seq.output_text, new_char_count, sampling_params.stop,
             sampling_params.include_stop_str_in_output)
         if stop is not None:
+            raise RuntimeError("UNREACHABLE")
             stop_str, truncate_to = stop
             if truncate_to != -1:
                 seq.output_text = seq.output_text[:truncate_to]
@@ -82,13 +102,23 @@ class StopChecker:
 
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self._get_max_model_len(lora_req):
+            print(f"WARNING: Exceed max model length.")
+            print(f"sequence_len={seq.get_len()}, max_model_len={self._get_max_model_len(lora_req)}")
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
         # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
+        if ((not is_summary_stage) and seq.get_output_len() == sampling_params.max_tokens):
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
+        
+        # Locate the position of <summary> token to get the precise summary length
+        if is_summary_stage:
+            total_len = seq.get_output_len()
+            output_token_ids = list(seq.data._output_token_ids)
+            summary_start_idx = output_token_ids.index(summary_token_id)
+            if (total_len - summary_start_idx) == sampling_params.summary_max_tokens:
+                seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
 
     @staticmethod
     def check_stop_strings(

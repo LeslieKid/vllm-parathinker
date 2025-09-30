@@ -410,6 +410,31 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             prev_block = forked_blocks[-1]
 
         return forked_blocks
+    
+    def fork_with_indices(self, last_block, start_block_idx, end_block_idx):
+        source_blocks = get_all_blocks_recursively(last_block)[start_block_idx:end_block_idx]
+
+        forked_blocks: List[Block] = []
+        prev_block = None
+        for block in source_blocks:
+            block_id = block.block_id
+            assert block_id is not None
+
+            refcount = self._refcounter.incr(block_id)
+            assert refcount != 1, "can't fork free'd block_id = {}".format(
+                block_id)
+
+            forked_block = self._block_pool.init_block(
+                prev_block=prev_block,
+                token_ids=block.token_ids,
+                block_size=self._block_size,
+                physical_block_id=block_id,
+                extra_hash=block.extra_hash)
+
+            forked_blocks.append(forked_block)
+            prev_block = forked_blocks[-1]
+
+        return forked_blocks
 
     def get_num_free_blocks(self, device: Optional[Device] = None) -> int:
         assert device is None

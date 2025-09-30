@@ -169,7 +169,7 @@ class ModelConfig:
         limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
         use_async_output_proc: Whether to use async output processor.
-            Defaults to True.
+            Defaults to False.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
@@ -250,7 +250,7 @@ class ModelConfig:
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, list[str]]] = None,
         limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-        use_async_output_proc: bool = True,
+        use_async_output_proc: bool = False,
         config_format: ConfigFormat = ConfigFormat.AUTO,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
@@ -2705,8 +2705,10 @@ def _get_and_verify_max_len(
             scaling_factor = rope_scaling.get("factor", 1.0)
 
             if rope_type == "yarn":
+                # Customize max model length for parallel thinking
+                max_parthink_size = 8
                 derived_max_model_len = rope_scaling[
-                    "original_max_position_embeddings"]
+                    "original_max_position_embeddings"] * max_parthink_size
             derived_max_model_len *= scaling_factor
 
     if encoder_config and "max_seq_length" in encoder_config:

@@ -230,6 +230,24 @@ class BlockTable:
             _blocks=forked_blocks,
             max_block_sliding_window=self._max_block_sliding_window,
         )
+        
+    def fork_with_indices(self, src_start_idx: int = None, src_end_idx: int = None) -> "List[Block]":
+        """Creates a new BlockTable instance with a copy of the blocks from the
+        current instance.
+
+        This method creates a new BlockTable instance with the same block size,
+        block allocator, and a copy of the blocks from the current instance. The
+        new BlockTable has its own independent set of blocks, but shares the
+        same underlying memory allocation with the original BlockTable.
+        """
+        assert src_start_idx < src_end_idx
+        start_block_idx = src_start_idx // self._block_size
+        end_block_idx = (src_end_idx - 1) // self._block_size + 1
+        end_block_idx = min(end_block_idx, len(self._blocks))
+        
+        # Fork source blocks with indices
+        forked_blocks = self._allocator.fork_with_indices(self.blocks[-1], start_block_idx, end_block_idx)
+        return forked_blocks
 
     def free(self) -> None:
         """Frees the memory occupied by the blocks in the BlockTable.

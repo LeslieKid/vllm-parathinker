@@ -131,6 +131,10 @@ class BlockAllocator(ABC):
     @abstractmethod
     def fork(self, last_block: Block) -> List[Block]:
         pass
+    
+    @abstractmethod
+    def fork_with_indices(self, last_block: Block, start_block_idx: int, end_block_idx: int) -> List[Block]:
+        pass
 
     @abstractmethod
     def get_num_total_blocks(self) -> int:
@@ -251,6 +255,10 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def fork(self, last_block: Block) -> List[Block]:
+        pass
+    
+    @abstractmethod
+    def fork_with_indices(self, last_block: Block, start_block_idx: int, end_block_idx: int) -> List[Block]:
         pass
 
     @property

@@ -473,6 +473,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 self.sliding_window + self.block_size - 1) // self.block_size
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
+        
+        # token ids for <think1> ~ <think8> + <summary>
+        self.think_token_ids = [151665, 151667, 151669, 151671, 151673, 151675, 151677, 151679, 151681]
 
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
@@ -518,7 +521,60 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
         inter_data.input_tokens[seq_idx].extend(tokens)
-        inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
+        # TODO(syf) This function uses token id for specific tokenizer, leading to bad generalization. Fix it.
+        # Compute position offset for different reasoning paths in parallel thinking
+        position_offset = 0
+        summary_token_id = 151681 # token id for <summarhy>
+        if len(seq_data.output_token_ids) > 0:
+            first_output_token_id = seq_data.output_token_ids[0]
+            # Important(syf): The following calculation assumes that (think_n_id - think_n-1_id) == 2 and (parthink_size >= 2)
+            first_think_token_id = 151665 # token id for <think1>
+            # Summary stage
+            if summary_token_id in seq_data.output_token_ids:
+                assert first_output_token_id == first_think_token_id
+                assert len(inter_data.seq_ids) == 1
+            # Parallel thinking stage
+            elif first_output_token_id >= first_think_token_id and first_output_token_id <= 151680:
+                assert (first_output_token_id - first_think_token_id) % 2 == 0
+                cot_idx = (first_output_token_id - first_think_token_id) // 2
+            else:
+                raise RuntimeError("UNREACHABLE")
+
+            if summary_token_id in seq_data.output_token_ids:
+                assert summary_token_id in seq_data.output_token_ids
+                think_start_indices = []
+                max_cot_len = 0
+                for i, token_id in enumerate(seq_data.get_output_token_ids()):
+                    if token_id in self.think_token_ids:
+                        think_start_indices.append(i)
+                for idx in range(len(think_start_indices)-1):
+                    current_think_idx = think_start_indices[idx]
+                    next_think_idx = think_start_indices[idx+1]
+                    cot_len = next_think_idx - current_think_idx
+                    if cot_len > max_cot_len:
+                        max_cot_len = cot_len
+                summary_token_idx = seq_data.output_token_ids.index(summary_token_id)
+                position_offset = seq_data.get_prompt_len() + max_cot_len - summary_token_idx
+            else:
+                assert (first_output_token_id >= first_think_token_id and first_output_token_id <= 151680)
+                position_offset = 0
+        else:
+            cot_idx = seq_idx
+        
+        inter_data.input_positions[seq_idx].extend(range(context_len+position_offset,
+                                                         seq_len+position_offset))
+        # `token_types` is useless originally in ParaThinker. Thus, we regard it as `seg_ids` for convenience.
+        assert token_types == None or token_types == [], \
+            f"token_types should be None, but got {token_types}"
+        if len(seq_data.output_token_ids) > 0:
+            if summary_token_id in seq_data.output_token_ids:
+                # Segment id for summary part is set to 0
+                token_types = [0]
+            else:
+                token_types = [cot_idx + 1]
+        else:
+            token_types = [0] * (seq_len - context_len)
+            
         inter_data.token_types[seq_idx].extend(
             token_types if token_types else [])
         inter_data.query_lens[seq_idx] = seq_len - context_len
@@ -572,6 +628,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # so do normal computation.
             pass
         elif context_len < prefix_cache_len < seq_len:
+            raise RuntimeError("Unreachable code reaches")
             # Partial hit. Compute the missing part.
             uncomputed_start = prefix_cache_len - context_len
             inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
@@ -590,6 +647,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # erroneous behavior. FIXME: Ideally we should directly
             # mark all tokens as computed in the scheduler and do not
             # schedule this sequence, so this case should not happen.
+            raise RuntimeError("Unreachable code reaches")
             inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
                 seq_idx][-1:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
@@ -1519,6 +1577,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self.model, self.attn_backend.get_name(),
                         self.attn_state.graph_clone(batch_size),
                         self.model_config.is_encoder_decoder)
+                    
+                    # Create dummy seg_ids for capture if your model uses them
+                    dummy_seg_ids = None
+                    if hasattr(self.model.config, 'max_segments'):
+                        dummy_seg_ids = torch.zeros(
+                            batch_size, dtype=torch.long, device=self.device
+                        )
 
                     capture_inputs = {
                         "input_ids":
@@ -1535,7 +1600,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "memory_pool":
                         self.graph_memory_pool,
                         "stream":
-                        graph_capture_context.stream
+                        graph_capture_context.stream,
+                        "seg_ids":
+                        dummy_seg_ids
                     }
                     if previous_hidden_states is not None:
                         capture_inputs[
@@ -1688,19 +1755,40 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         previous_hidden_states = kwargs.get("previous_hidden_states")
         if prefill_meta is None and decode_meta.use_cuda_graph:
             assert model_input.input_tokens is not None
-            graph_batch_size = model_input.input_tokens.shape[0]
-            model_executable = self.graph_runners[virtual_engine][
-                graph_batch_size]
-            if previous_hidden_states is not None:
-                previous_hidden_states = torch.cat([
-                    previous_hidden_states,
-                    torch.empty([
-                        graph_batch_size - previous_hidden_states.shape[0],
-                        *previous_hidden_states.shape[1:]
-                    ],
-                                dtype=previous_hidden_states.dtype,
-                                device=previous_hidden_states.device)
-                ])
+            actual_batch_size = model_input.input_tokens.shape[0]
+            available_graph_sizes = sorted(self.graph_runners[virtual_engine].keys())
+            
+            # Find the smallest graph size that fits this batch
+            graph_batch_size = None
+            for size in available_graph_sizes:
+                if size >= actual_batch_size:
+                    graph_batch_size = size
+                    break
+                
+            if graph_batch_size is None:
+                # Fall back to eager execution
+                model_executable = self.model
+                logger.warning(
+                    f"No CUDA graph available for batch size {actual_batch_size}. "
+                    f"Available sizes: {available_graph_sizes}. "
+                    f"Falling back to eager execution."
+                )
+            else:
+                if graph_batch_size > actual_batch_size:
+                    pad_size = graph_batch_size - actual_batch_size
+                    model_input = self._pad_input_for_graph(model_input, pad_size)
+                    
+                model_executable = self.graph_runners[virtual_engine][graph_batch_size]
+                if previous_hidden_states is not None:
+                    previous_hidden_states = torch.cat([
+                        previous_hidden_states,
+                        torch.empty([
+                            graph_batch_size - previous_hidden_states.shape[0],
+                            *previous_hidden_states.shape[1:]
+                        ],
+                                    dtype=previous_hidden_states.dtype,
+                                    device=previous_hidden_states.device)
+                    ])
         else:
             model_executable = self.model
 
@@ -1739,6 +1827,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if not bypass_model_exec:
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):
+                # Prepare model forward kwargs
+                model_forward_kwargs = {}
+                
+                # Use token_types as seg_ids
+                if model_input.token_types is not None:
+                    model_forward_kwargs["seg_ids"] = model_input.token_types
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
@@ -1747,6 +1841,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                                  device=self.device),
                     **seqlen_agnostic_kwargs,
                     **model_kwargs,
+                    **model_forward_kwargs, 
                 )
 
         if (self.observability_config is not None
@@ -1832,6 +1927,108 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             output.hidden_states = hidden_states
 
         return [output]
+    
+    def _pad_input_for_graph(
+        self,
+        model_input: ModelInputForGPUWithSamplingMetadata,
+        pad_size: int
+    ) -> ModelInputForGPUWithSamplingMetadata:
+        """
+        Pad model inputs to match CUDA graph batch size requirements.
+        Used when sequences finish at different times within a group.
+        """
+        if pad_size <= 0:
+            return model_input
+            
+        device = self.device
+        
+        padded_input_tokens = None
+        if model_input.input_tokens is not None:
+            padding = torch.zeros(pad_size, dtype=model_input.input_tokens.dtype, device=device)
+            padded_input_tokens = torch.cat([model_input.input_tokens, padding])
+        
+        padded_input_positions = None
+        if model_input.input_positions is not None:
+            if len(model_input.input_positions.shape) == 1:
+                padding = torch.zeros(pad_size, dtype=model_input.input_positions.dtype, device=device)
+                padded_input_positions = torch.cat([model_input.input_positions, padding])
+            else:
+                raise RuntimeError("mRoPE is not supported yet")
+        
+        padded_token_types = model_input.token_types
+        if model_input.token_types is not None:
+            padding = torch.zeros(pad_size, dtype=model_input.token_types.dtype, device=device)
+            padded_token_types = torch.cat([model_input.token_types, padding])
+        
+        padded_attn_metadata = model_input.attn_metadata
+        if model_input.attn_metadata is not None:
+            # 1. Slot mapping - critical for KV cache access
+            if hasattr(model_input.attn_metadata, 'slot_mapping') and model_input.attn_metadata.slot_mapping is not None:
+                padding = torch.full((pad_size,), -1, dtype=model_input.attn_metadata.slot_mapping.dtype, device=device)
+                slot_mapping = torch.cat([model_input.attn_metadata.slot_mapping, padding])
+                model_input.attn_metadata.slot_mapping = slot_mapping
+            
+            # 2. Block tables - important for attention calculation
+            if hasattr(model_input.attn_metadata, 'block_tables') and model_input.attn_metadata.block_tables is not None:
+                # Padding with -1 to indicate "no block" for padded sequences
+                block_shape = model_input.attn_metadata.block_tables.shape
+                padding = torch.full((pad_size, block_shape[1]), -1, 
+                                    dtype=model_input.attn_metadata.block_tables.dtype, 
+                                    device=device)
+                block_tables = torch.cat([model_input.attn_metadata.block_tables, padding])
+                model_input.attn_metadata.block_tables = block_tables
+                
+            # 3. Update any other metadata fields that need padding
+            # This depends on the specific attention backend implementation
+            # For example, update context_lens, max_context_len, etc.
+            
+            # 4. Update decode metadata specifically for CUDA graph execution
+            if hasattr(model_input.attn_metadata, 'decode_metadata'):
+                # Update batch size in decode_metadata
+                decode_meta = model_input.attn_metadata.decode_metadata
+                if hasattr(decode_meta, 'batch_size'):
+                    decode_meta.batch_size += pad_size
+        
+        padded_lora_mapping = model_input.lora_mapping
+        if model_input.lora_mapping is not None:
+            # Pad index_mapping
+            if hasattr(model_input.lora_mapping, 'index_mapping'):
+                index_mapping = list(model_input.lora_mapping.index_mapping) + [0] * pad_size
+                # Pad prompt_mapping if needed
+                if hasattr(model_input.lora_mapping, 'prompt_mapping'):
+                    prompt_mapping = list(model_input.lora_mapping.prompt_mapping)
+                    
+                padded_lora_mapping = LoRAMapping(
+                    index_mapping=index_mapping,
+                    prompt_mapping=prompt_mapping,
+                    is_prefill=model_input.lora_mapping.is_prefill
+                )
+        
+        padded_prompt_adapter_mapping = model_input.prompt_adapter_mapping
+        if model_input.prompt_adapter_mapping is not None:
+            # Add padding to prompt adapter mappings
+            index_mapping = list(model_input.prompt_adapter_mapping.index_mapping) + [0] * pad_size
+            prompt_mapping = list(model_input.prompt_adapter_mapping.prompt_mapping)
+            
+            padded_prompt_adapter_mapping = PromptAdapterMapping(
+                index_mapping,
+                prompt_mapping
+            )
+        
+        padded_seq_lens = model_input.seq_lens + [1] * pad_size if model_input.seq_lens else None
+        padded_query_lens = model_input.query_lens + [0] * pad_size if model_input.query_lens else None
+        
+        return dataclasses.replace(
+            model_input,
+            input_tokens=padded_input_tokens,
+            input_positions=padded_input_positions,
+            token_types=padded_token_types,
+            attn_metadata=padded_attn_metadata,
+            seq_lens=padded_seq_lens,
+            query_lens=padded_query_lens,
+            lora_mapping=padded_lora_mapping,
+            prompt_adapter_mapping=padded_prompt_adapter_mapping
+        )
 
     def need_recv_kv(self, model_input, kv_caches) -> bool:
         """Check if we need to receive kv-cache from the other worker.
@@ -1918,6 +2115,9 @@ class CUDAGraphRunner(nn.Module):
         **kwargs,
     ):
         assert self._graph is None
+        # Extract seg_ids from kwargs if present
+        seg_ids = kwargs.get('seg_ids', None)
+        
         # Run the model a few times without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
@@ -1998,6 +2198,12 @@ class CUDAGraphRunner(nn.Module):
             # so the shape is not padded, we need to copy partial only
             self.input_buffers["positions"][:positions.shape[0]].copy_(
                 positions, non_blocking=True)
+        
+        # Handle seg_ids if present
+        seg_ids = kwargs.get('seg_ids', None)
+        if seg_ids is not None and "seg_ids" in self.input_buffers:
+            self.input_buffers["seg_ids"][:seg_ids.shape[0]].copy_(
+                seg_ids, non_blocking=True)
 
         if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(

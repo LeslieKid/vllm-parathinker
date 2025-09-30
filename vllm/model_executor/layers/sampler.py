@@ -456,10 +456,9 @@ def _greedy_sample(
 
         seq_ids = seq_group.seq_ids
         num_parent_seqs = len(seq_ids)
-        assert num_parent_seqs == 1, (
-            "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
-        next_token_ids = [samples_lst[sample_idx]]
+        # Greedy sampling for native parallel thinking
+        next_token_ids = samples_lst[sample_idx:sample_idx+num_parent_seqs]
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     return results

@@ -430,6 +430,7 @@ class Sequence:
         self.output_text = ""
 
         self.status = SequenceStatus.WAITING
+        self.is_padding = False
         self.stop_reason: Union[int, str, None] = None
 
         # These are used to keep track of delta outputs
@@ -638,6 +639,7 @@ class SequenceGroup:
         seqs: The list of sequences.
         sampling_params: The sampling parameters used to generate the outputs.
         arrival_time: The arrival time of the request.
+        finished_think: Whether the think phase in parallel thinking is finished or not.
         lora_request: LoRA request.
         pooling_params: The parameters used to generate the pooler
             for a pooling model.
@@ -668,10 +670,14 @@ class SequenceGroup:
                  draft_size: int = 1) -> None:
         self.request_id = request_id
         self.seqs = seqs
-        self.first_seq = seqs[0]
+        if len(seqs) != 0:
+            self.first_seq = seqs[0]
+            self.seqs_dict = {seq.seq_id: seq for seq in seqs}
+        else:
+            self.seqs_dict = {}
+        self.finished_think = False
         self.arrival_time = arrival_time
         self.is_single_seq = len(seqs) == 1
-        self.seqs_dict = {seq.seq_id: seq for seq in seqs}
 
         self.sampling_params = sampling_params
         self.metrics = RequestMetrics(arrival_time=arrival_time,
@@ -856,6 +862,9 @@ class SequenceGroup:
             return self.seqs if self.first_seq.is_finished() else []
 
         return [seq for seq in self.seqs if seq.is_finished()]
+    
+    def get_unfinished_seqs(self) -> list[Sequence]:
+        return [seq for seq in self.seqs if not seq.is_finished()]
 
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
@@ -887,12 +896,76 @@ class SequenceGroup:
         return len(self.get_finished_seqs())
 
     def is_finished(self) -> bool:
+        if not self.finished_think:
+            return False
         if self.is_single_seq:
             return self.first_seq.is_finished()
         return all(seq.is_finished() for seq in self.seqs)
+    
+    # TODO(syf) Pass the `ratio_threshold` as parameter in user-defined configuration.
+    def is_think_stage_finished(self, ratio_threshold: float=0.1) -> bool:
+        """
+        Return True if the specified ratio or more of the sequences (reasoning paths) in the group are finished.
+        Parameter `ratio_threshold` determines the termination strategy for parallel reasoning stage
+        Default strategy is First-Finish
+        """
+        if self.finished_think:
+            return True
+        if self.is_single_seq:
+            return self.first_seq.is_finished()
+        if not self.seqs:
+            return False
+        
+        finished_count = sum(1 for seq in self.seqs if seq.is_finished())
+        self.finished_think = (finished_count >= len(self.seqs) * ratio_threshold)
+        return self.finished_think
 
     def is_prefill(self) -> bool:
         return self.first_seq.is_prefill()
+    
+    def prepare_merged_sequence(self, target_seq_id: int) -> Sequence:
+        """
+        Prepare a new sequence with combined token information from all sequences in the group.
+        This function is called for combining all reasoning paths (in token-level) for further summarization.
+        
+        This creates a new sequence with:
+        1. The common prompt
+        2. Concatenated output tokens from all sequences in the group
+        """
+        if self.is_single_seq:
+            raise ValueError("The parallel size should be larger than 1 for ParaThinker")
+            return self.first_seq.fork(new_seq_id=target_seq_id)
+        if len(self.seqs) == 0:
+            raise ValueError("Cannot merge an empty sequence group")
+        
+        template_seq = self.first_seq
+        
+        new_seq = Sequence(
+            seq_id=target_seq_id,
+            inputs=template_seq.inputs.inputs,
+            block_size=template_seq.block_size,
+            eos_token_id=template_seq.eos_token_id,
+            lora_request=template_seq.lora_request,
+            prompt_adapter_request=template_seq.prompt_adapter_request
+        )
+        
+        # Update the new sequence data with the combined output
+        all_output_tokens = []
+        all_output_logprobs = []
+        for seq in self.seqs:
+            seq_tokens = seq.get_output_token_ids()
+            assert len(seq.output_logprobs) == len(seq_tokens)
+            for i, token in enumerate(seq_tokens):
+                if i < len(seq.output_logprobs):
+                    all_output_tokens.append(token)
+                    all_output_logprobs.append(seq.output_logprobs[i])
+
+        # Initialize the sequence with the combined data
+        for i, (token_id, logprobs) in enumerate(zip(all_output_tokens, all_output_logprobs)):
+            new_seq.append_token_id(token_id, logprobs)
+        
+        new_seq.status = SequenceStatus.RUNNING
+        return new_seq
 
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "
@@ -1440,7 +1513,6 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             assert seq_group is not None
             engine.seq_id_to_seq_group[request_id_i] = group
             group.to_be_finished[request_id_i] = seq_group
-            seqs.append(seq_group.seqs[0])
 
         # for parallel sampling, the `assembled_seq_group` is always
         # available, since we have all the sequences ready, and they
@@ -1459,6 +1531,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             priority=seq_group.priority,
         )
 
+        group.assembled_seq_group.finished_think = True
         group.streaming = params.output_kind == RequestOutputKind.DELTA
         group.output_produced = False
 
@@ -1481,6 +1554,11 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
                 and seq_group.request_id in self.to_be_finished
                 and seq_group.is_finished()):
             assert self.assembled_seq_group is not None
+            summary_seq = seq_group.seqs[-1]
+            self.assembled_seq_group.seqs.append(summary_seq)
+            self.assembled_seq_group.first_seq = summary_seq
+            self.assembled_seq_group.seqs_dict[summary_seq.seq_id] = summary_seq
+            
             params = self.assembled_seq_group.sampling_params
             assert isinstance(params, SamplingParams)
             if not self.output_produced:
@@ -1496,4 +1574,11 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
                 return self.assembled_seq_group
             if self.output_produced:
                 return None
+            
+        if (seq_group.request_id in self.to_be_finished and seq_group.is_finished()):
+            summary_seq = seq_group.seqs[-1]
+            self.assembled_seq_group.seqs.append(summary_seq)
+            self.assembled_seq_group.first_seq = summary_seq
+            self.assembled_seq_group.seqs_dict[summary_seq.seq_id] = summary_seq
+            
         return None

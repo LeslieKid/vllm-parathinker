@@ -159,6 +159,7 @@ class SamplingParams(
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
+        summary_max_tokens: Maximum number of tokens to generate summary part.
         min_tokens: Minimum number of tokens to generate per output sequence
             before EOS or stop_token_ids can be generated
         logprobs: Number of log probabilities to return per output token.
@@ -206,6 +207,7 @@ class SamplingParams(
     stop_token_ids: Optional[list[int]] = None
     ignore_eos: bool = False
     max_tokens: Optional[int] = 16
+    summary_max_tokens: Optional[int] = 128
     min_tokens: int = 0
     logprobs: Optional[int] = None
     prompt_logprobs: Optional[int] = None

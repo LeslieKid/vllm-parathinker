@@ -222,6 +222,13 @@ class LLMEngine:
                 "This should not happen. As a workaround, try using "
                 "LLMEngine.from_vllm_config(...) or explicitly set "
                 "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+        
+        # specific initialization for parallel thinking
+        self.cot_token_ids = []
+        self.okay_token_ids = []
+        self.summary_token_ids = []
+        self.parthink_size = 4
+        self.pad_token_id = []
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -1143,7 +1150,7 @@ class LLMEngine:
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
                     self.output_processor.process_outputs(
-                        seq_group, output, is_async)
+                        seq_group, output, self.cot_token_ids, self.okay_token_ids, self.summary_token_ids, self.parthink_size, self.pad_token_id, is_async)
 
             if seq_group.is_finished():
                 finished_now.append(i)
