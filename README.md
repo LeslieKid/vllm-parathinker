@@ -1,11 +1,16 @@
 ## ParaThinker — Native Parallel Thinking
 
+[![Paper](https://img.shields.io/badge/arXiv-2509.04475-red)](https://arxiv.org/abs/2509.04475)
+
+[![huggingface](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-FFD21E)](https://huggingface.co/Leslie04/ParaThinker-1.5B)
+
 ![ParaThinker Architecture](assets/figmain.jpg)
 
 **This [vLLM](https://github.com/vllm-project/vllm) submodule contains a small, purpose-built customization that implements the *native parallel thinking* inference engine used by the ParaThinker project.**
 
 - The implementation and design are described in our paper: **[“ParaThinker”](https://arxiv.org/pdf/2509.04475)**. It leverages the PagedAttention in vLLM for efficient memory management, mainly on reusing KV cache.
 - See **Section 4.3 (Inference Engine)** in our paper for more details.
+- ps: vLLM V1 is not supported for parallel thinking yet. Please set `os.environ["VLLM_USE_V1"] = "0"`.
 
 [vLLM](https://github.com/vllm-project/vllm) is a fast and easy-to-use library for LLM inference and serving. Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evolved into a community-driven project with contributions from both academia and industry.
 
@@ -38,7 +43,7 @@ Based on the original vLLM API, we further additionally introduce the following 
 | Parameter           | Description                                                  | Default/Example              |
 | ------------------- | ------------------------------------------------------------ | ---------------------------- |
 | `cot_token_ids`     | Token IDs of Special Tokens for Boosting Thought Diversity, placed at the beginning of each reasoning path to lead the model to generate a distinct trajectory. (<think1> ~ <think8> here) | IDs of `<think1>`~`<think8>` |
-| `okay_token_ids`    | Optional (different) forced token after different special tokens (cot_token_ids above). | `[]` (Empty List)            |
+| `okay_token_ids`    | Optional (different) forced token after different special tokens (cot_token_ids above). | `[[]] * 8` (empty list for each path)            |
 | `summary_token_ids` | Token IDs of summary template under summarization stage. The template we use is `"<summary>By analyzing multiple reasoning processes above, I concluded that: The final answer is"`. | IDs for summary tempalte     |
 | `parthink_size`     | Parallel Size / Number of parallel reasoning paths. (Currently only supports a maximum of 8) | 4                            |
 | `pad_token_id`      | Padding token used for fill the block under PagedAttention mechanism | ID of `<vllm_pad>`           |
