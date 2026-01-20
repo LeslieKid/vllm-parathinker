@@ -218,9 +218,8 @@ class LlamaAttention(nn.Module):
             else:
                 seg_ids_1d = seg_ids
             
-            assert seg_ids_1d.shape[0] == total_tokens
-            if seg_ids_1d.shape[0] > total_tokens:
-                seg_ids_1d = seg_ids_1d[:total_tokens]
+            assert seg_ids_1d.shape[0] == total_tokens, \
+                f"seg_ids shape {seg_ids_1d.shape[0]} does not match total_tokens {total_tokens}"
             
             seg_emb = self.seg_embeddings(seg_ids_1d)
             
