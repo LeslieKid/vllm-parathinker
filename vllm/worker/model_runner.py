@@ -477,7 +477,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # token ids for parallel thinking - these can be configured per model
         # Default values are for Qwen2.5 model: <think1> ~ <think8> + <summary>
         # For other models, these should be updated via set_think_token_ids()
-        self._think_token_ids: Optional[List[int]] = None
+        self._cot_token_ids: Optional[List[int]] = None
         self._summary_token_id: Optional[int] = None
     
     def set_think_token_ids(self, cot_token_ids: List[int], summary_token_id: int) -> None:
@@ -487,20 +487,27 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             cot_token_ids: List of token IDs for <think1>, <think2>, etc.
             summary_token_id: Token ID for <summary>
         """
-        # Combine cot_token_ids and summary_token_id to form the full list
-        self._think_token_ids = cot_token_ids + [summary_token_id]
+        self._cot_token_ids = cot_token_ids
         self._summary_token_id = summary_token_id
     
     @property
-    def think_token_ids(self) -> List[int]:
-        """Get the token IDs for parallel thinking tokens.
+    def cot_token_ids(self) -> List[int]:
+        """Get the token IDs for parallel thinking start tokens (<think1>, <think2>, etc.).
         
         Returns default Qwen2.5 token IDs if not explicitly set.
         """
-        if self._think_token_ids is not None:
-            return self._think_token_ids
+        if self._cot_token_ids is not None:
+            return self._cot_token_ids
         # Default Qwen2.5 token IDs for backward compatibility
-        return [151665, 151667, 151669, 151671, 151673, 151675, 151677, 151679, 151681]
+        return [151665, 151667, 151669, 151671, 151673, 151675, 151677, 151679]
+    
+    @property
+    def think_token_ids(self) -> List[int]:
+        """Get all token IDs for parallel thinking (cot tokens + summary token).
+        
+        Returns default Qwen2.5 token IDs if not explicitly set.
+        """
+        return self.cot_token_ids + [self.summary_token_id]
     
     @property
     def summary_token_id(self) -> int:
@@ -561,8 +568,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Uses configurable token IDs for model-agnostic support
         position_offset = 0
         summary_token_id = self.summary_token_id
-        # Get the cot_token_ids (think_token_ids without the summary token)
-        cot_token_ids = [tid for tid in self.think_token_ids if tid != summary_token_id]
+        # Get cot_token_ids directly from the property (avoids repeated filtering)
+        cot_token_ids = self.cot_token_ids
         first_think_token_id = cot_token_ids[0] if cot_token_ids else None
         
         if len(seq_data.output_token_ids) > 0:
@@ -597,9 +604,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 summary_token_idx = seq_data.output_token_ids.index(summary_token_id)
                 position_offset = seq_data.get_prompt_len() + max_cot_len - summary_token_idx
             else:
-                # Validate that first_output_token_id is a valid cot token
-                assert first_output_token_id in cot_token_ids, \
-                    f"Expected first output token to be in cot_token_ids, got {first_output_token_id}"
                 position_offset = 0
         else:
             cot_idx = seq_idx

@@ -125,9 +125,10 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                                         parthink_size: int,
                                         pad_token_id: int,
                                         is_async: bool) -> None:
-        # Use the first cot token id as the base think token (e.g., <think1> serves as the base for <think>)
-        # For models that need a distinct <think> token, this should be passed separately
-        think_token_id = cot_token_ids[0] if cot_token_ids else None
+        # When a parallel thinking path accidentally generates a special token (like another cot token
+        # or summary token), we replace it with a valid thinking token. We use the first cot token 
+        # (e.g., <think1>) as the replacement since it's a valid token for this context.
+        replacement_think_token_id = cot_token_ids[0] if cot_token_ids else None
         sampling_params = seq_group.sampling_params
         custom_token_probs = 0.99
 
@@ -188,9 +189,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     sample_logprobs = sample.logprobs
                     
                     # Parallel thinking stage should not generate the special cot start token ids,
-                    # if it occurs by accident (because of the randomness of sampling), replace it with `<think>` directly.
+                    # if it occurs by accident (because of the randomness of sampling), replace it with a valid thinking token
                     if (sample_output_token in cot_token_ids) or (sample_output_token == summary_token_ids[0]):
-                        sample_output_token = think_token_id
+                        sample_output_token = replacement_think_token_id
                         sample_logprobs = {sample_output_token:Logprob(logprob=math.log(1-custom_token_probs))}
                         
                     # Check whether the current reasoning path encounter stop tokens
