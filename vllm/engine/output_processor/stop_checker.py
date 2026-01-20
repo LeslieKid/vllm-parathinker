@@ -34,11 +34,15 @@ class StopChecker:
         sampling_params: SamplingParams,
         lora_req: Optional[LoRARequest] = None,
         is_summary_stage: bool = False,
+        summary_token_id: Optional[int] = None,
     ) -> None:
         """Stop the finished sequences.
 
        new_char_count is the number of chars added to the
            sequence's output text for the newly generated token
+       
+       summary_token_id: The token ID for <summary>, used to determine the start of summary stage.
+           If None, summary stage handling is skipped.
         """
 
         # Check if the minimum number of tokens has been generated yet;
@@ -61,14 +65,14 @@ class StopChecker:
         # Check if a stop token was encountered.
         # This assumes a single token produced per step.
         last_token_id = seq.get_last_token_id()
-        summary_token_id = 151681 # token id for `<summary>`, which is the sign for start of summary stage
-        summary_end_token_id = summary_token_id + 1 # token id for `</summary>`
+        # Calculate summary_end_token_id as (summary_token_id + 1) for paired tokens like <summary>/</summary>
+        summary_end_token_id = (summary_token_id + 1) if summary_token_id is not None else None
         if last_token_id in (sampling_params.stop_token_ids or ()):
             if new_char_count and (
                     not sampling_params.include_stop_str_in_output):
                 # Remove last token
                 seq.output_text = seq.output_text[:-new_char_count]
-            if is_summary_stage:
+            if is_summary_stage and summary_end_token_id is not None:
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 seq.data._output_token_ids[-1] = summary_end_token_id
                 seq.data._new_appended_tokens[-1] = summary_end_token_id
@@ -113,12 +117,13 @@ class StopChecker:
             return
         
         # Locate the position of <summary> token to get the precise summary length
-        if is_summary_stage:
+        if is_summary_stage and summary_token_id is not None:
             total_len = seq.get_output_len()
             output_token_ids = list(seq.data._output_token_ids)
-            summary_start_idx = output_token_ids.index(summary_token_id)
-            if (total_len - summary_start_idx) == sampling_params.summary_max_tokens:
-                seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            if summary_token_id in output_token_ids:
+                summary_start_idx = output_token_ids.index(summary_token_id)
+                if (total_len - summary_start_idx) == sampling_params.summary_max_tokens:
+                    seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
 
     @staticmethod
     def check_stop_strings(

@@ -107,7 +107,8 @@ class LlamaAttention(nn.Module):
                  bias: bool = False,
                  bias_o_proj: bool = False,
                  cache_config: Optional[CacheConfig] = None,
-                 prefix: str = "") -> None:
+                 prefix: str = "",
+                 max_segments: int = 32) -> None:
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
@@ -136,6 +137,10 @@ class LlamaAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
+
+        # Introduce and initialize segment embeddings for parallel thinking
+        self.seg_embeddings = nn.Embedding(max_segments, self.head_dim)
+        nn.init.zeros_(self.seg_embeddings.weight)
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
@@ -197,9 +202,40 @@ class LlamaAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        seg_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        
+        # Apply segment embeddings to k and v before rotary embeddings (thought-specific positional embedding)
+        if seg_ids is not None:
+            total_tokens = hidden_states.shape[0]
+            
+            # Handle different seg_ids shapes and ensure alignment
+            if seg_ids.dim() == 2:
+                # If seg_ids has shape [batch_size, seq_len], extract relevant segment IDs
+                raise ValueError("segment ids should be 1D")
+            else:
+                seg_ids_1d = seg_ids
+            
+            assert seg_ids_1d.shape[0] == total_tokens, \
+                f"seg_ids shape {seg_ids_1d.shape[0]} does not match total_tokens {total_tokens}"
+            
+            seg_emb = self.seg_embeddings(seg_ids_1d)
+            
+            # Reshape k, v to apply segment embeddings
+            k = k.view(total_tokens, self.num_kv_heads, self.head_dim)
+            v = v.view(total_tokens, self.num_kv_heads, self.head_dim)
+            
+            # Add segment embeddings (broadcast across heads)
+            seg_emb = seg_emb.unsqueeze(1)
+            k = k + seg_emb
+            v = v + seg_emb
+            
+            # Reshape back to original format
+            k = k.view(total_tokens, self.kv_size)
+            v = v.view(total_tokens, self.kv_size)
+        
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -225,6 +261,7 @@ class LlamaDecoderLayer(nn.Module):
                 config.original_max_position_embeddings)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
+        max_segments = getattr(config, "max_segments", 32)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
@@ -248,6 +285,7 @@ class LlamaDecoderLayer(nn.Module):
             bias_o_proj=bias_o_proj,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
+            max_segments=max_segments,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -267,6 +305,7 @@ class LlamaDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
+        seg_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -275,8 +314,11 @@ class LlamaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states)
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            seg_ids=seg_ids,
+        )
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -342,6 +384,7 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        seg_ids: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -355,7 +398,12 @@ class LlamaModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                seg_ids,
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -385,6 +433,10 @@ class LlamaModel(nn.Module):
                     or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
+                continue
+            # Skip loading segment embeddings from pre-trained weights
+            # (they are initialized to zeros and trained during fine-tuning)
+            if "seg_embeddings.weight" in name:
                 continue
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
@@ -430,6 +482,13 @@ class LlamaModel(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
+        
+        # Mark segment embeddings as "loaded" even though they're not from checkpoint
+        # (they are zero-initialized and trained during fine-tuning for parallel thinking)
+        for param_name in params_dict:
+            if "seg_embeddings.weight" in param_name:
+                loaded_params.add(param_name)
+        
         return loaded_params
 
 
@@ -525,9 +584,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        seg_ids: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, intermediate_tensors,
-                                  inputs_embeds)
+                                  inputs_embeds, seg_ids)
         return model_output
 
     def compute_logits(

@@ -225,6 +225,7 @@ class LLMEngine:
         
         # specific initialization for parallel thinking
         self.cot_token_ids = []
+        self.think_token_id = None  # Token ID for <think> (replacement token)
         self.okay_token_ids = []
         self.summary_token_ids = []
         self.parthink_size = 4
@@ -1150,7 +1151,7 @@ class LLMEngine:
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
                     self.output_processor.process_outputs(
-                        seq_group, output, self.cot_token_ids, self.okay_token_ids, self.summary_token_ids, self.parthink_size, self.pad_token_id, is_async)
+                        seq_group, output, self.cot_token_ids, self.think_token_id, self.okay_token_ids, self.summary_token_ids, self.parthink_size, self.pad_token_id, is_async)
 
             if seq_group.is_finished():
                 finished_now.append(i)
