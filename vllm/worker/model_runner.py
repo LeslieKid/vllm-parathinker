@@ -474,8 +474,44 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
         
-        # token ids for <think1> ~ <think8> + <summary>
-        self.think_token_ids = [151665, 151667, 151669, 151671, 151673, 151675, 151677, 151679, 151681]
+        # token ids for parallel thinking - these can be configured per model
+        # Default values are for Qwen2.5 model: <think1> ~ <think8> + <summary>
+        # For other models, these should be updated via set_think_token_ids()
+        self._think_token_ids: Optional[List[int]] = None
+        self._summary_token_id: Optional[int] = None
+    
+    def set_think_token_ids(self, cot_token_ids: List[int], summary_token_id: int) -> None:
+        """Set the token IDs used for parallel thinking.
+        
+        Args:
+            cot_token_ids: List of token IDs for <think1>, <think2>, etc.
+            summary_token_id: Token ID for <summary>
+        """
+        # Combine cot_token_ids and summary_token_id to form the full list
+        self._think_token_ids = cot_token_ids + [summary_token_id]
+        self._summary_token_id = summary_token_id
+    
+    @property
+    def think_token_ids(self) -> List[int]:
+        """Get the token IDs for parallel thinking tokens.
+        
+        Returns default Qwen2.5 token IDs if not explicitly set.
+        """
+        if self._think_token_ids is not None:
+            return self._think_token_ids
+        # Default Qwen2.5 token IDs for backward compatibility
+        return [151665, 151667, 151669, 151671, 151673, 151675, 151677, 151679, 151681]
+    
+    @property
+    def summary_token_id(self) -> int:
+        """Get the token ID for <summary>.
+        
+        Returns default Qwen2.5 token ID if not explicitly set.
+        """
+        if self._summary_token_id is not None:
+            return self._summary_token_id
+        # Default Qwen2.5 token ID for backward compatibility
+        return 151681
 
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
@@ -521,27 +557,32 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
         inter_data.input_tokens[seq_idx].extend(tokens)
-        # TODO(syf) This function uses token id for specific tokenizer, leading to bad generalization. Fix it.
         # Compute position offset for different reasoning paths in parallel thinking
+        # Uses configurable token IDs for model-agnostic support
         position_offset = 0
-        summary_token_id = 151681 # token id for <summarhy>
+        summary_token_id = self.summary_token_id
+        # Get the cot_token_ids (think_token_ids without the summary token)
+        cot_token_ids = [tid for tid in self.think_token_ids if tid != summary_token_id]
+        first_think_token_id = cot_token_ids[0] if cot_token_ids else None
+        
         if len(seq_data.output_token_ids) > 0:
             first_output_token_id = seq_data.output_token_ids[0]
-            # Important(syf): The following calculation assumes that (think_n_id - think_n-1_id) == 2 and (parthink_size >= 2)
-            first_think_token_id = 151665 # token id for <think1>
             # Summary stage
             if summary_token_id in seq_data.output_token_ids:
-                assert first_output_token_id == first_think_token_id
+                # In summary stage, first output token should be the first cot token
+                if first_think_token_id is not None:
+                    assert first_output_token_id == first_think_token_id, \
+                        f"Expected first output token to be {first_think_token_id}, got {first_output_token_id}"
                 assert len(inter_data.seq_ids) == 1
             # Parallel thinking stage
-            elif first_output_token_id >= first_think_token_id and first_output_token_id <= 151680:
-                assert (first_output_token_id - first_think_token_id) % 2 == 0
-                cot_idx = (first_output_token_id - first_think_token_id) // 2
+            elif first_output_token_id in cot_token_ids:
+                # Get the index of the cot token to determine which reasoning path this is
+                cot_idx = cot_token_ids.index(first_output_token_id)
             else:
-                raise RuntimeError("UNREACHABLE")
+                raise RuntimeError(f"Unexpected first output token: {first_output_token_id}. "
+                                   f"Expected one of {cot_token_ids}")
 
             if summary_token_id in seq_data.output_token_ids:
-                assert summary_token_id in seq_data.output_token_ids
                 think_start_indices = []
                 max_cot_len = 0
                 for i, token_id in enumerate(seq_data.get_output_token_ids()):
@@ -556,7 +597,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 summary_token_idx = seq_data.output_token_ids.index(summary_token_id)
                 position_offset = seq_data.get_prompt_len() + max_cot_len - summary_token_idx
             else:
-                assert (first_output_token_id >= first_think_token_id and first_output_token_id <= 151680)
+                # Validate that first_output_token_id is a valid cot token
+                assert first_output_token_id in cot_token_ids, \
+                    f"Expected first output token to be in cot_token_ids, got {first_output_token_id}"
                 position_offset = 0
         else:
             cot_idx = seq_idx

@@ -125,8 +125,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                                         parthink_size: int,
                                         pad_token_id: int,
                                         is_async: bool) -> None:
-        # TODO(syf) This important function uses token id for specific tokenizer, leading to bad generalization. Fix it.
-        think_token_id = 151648 # token id for `<think>`
+        # Use the first cot token id as the base think token (e.g., <think1> serves as the base for <think>)
+        # For models that need a distinct <think> token, this should be passed separately
+        think_token_id = cot_token_ids[0] if cot_token_ids else None
         sampling_params = seq_group.sampling_params
         custom_token_probs = 0.99
 
@@ -178,6 +179,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     new_char_count,
                     sampling_params,
                     lora_req=seq_group.lora_request,
+                    summary_token_id=summary_token_ids[0] if summary_token_ids else None,
                 )
                 
             if not is_async and (not seq_group.is_think_stage_finished()):
@@ -195,7 +197,10 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     # Match the end tokens (e.g. </think1>, </think2>) for parallel thinking stage
                     if len(seq.data.output_token_ids) > 0 and sample_output_token in (sampling_params.stop_token_ids or ()):
                         first_output_token_id = seq.data.output_token_ids[0]
-                        assert first_output_token_id >= 151665 and first_output_token_id <= 151679 and first_output_token_id % 2 == 1
+                        # Validate that first_output_token_id is a valid cot token
+                        assert first_output_token_id in cot_token_ids, \
+                            f"Expected first output token to be in cot_token_ids, got {first_output_token_id}"
+                        # The end token ID is assumed to be (start_token_id + 1) for paired tokens like <thinkN>/</thinkN>
                         end_token_id = first_output_token_id + 1
                         sample_output_token = end_token_id
                         sample_logprobs = {sample_output_token:Logprob(logprob=math.log(custom_token_probs))}
@@ -203,7 +208,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     offset = seq.get_output_len() - 1
                     # `okay_list` forces inference engine output specific tokens at the very begining of the reasoning
                     # path. Empty by default.
-                    okay_list_idx = (seq.data.output_token_ids[0] - 151665) // 2
+                    # Get the index of the cot token in cot_token_ids to determine which okay_list to use
+                    first_output_token_id = seq.data.output_token_ids[0]
+                    okay_list_idx = cot_token_ids.index(first_output_token_id) if first_output_token_id in cot_token_ids else 0
                     if offset < len(okay_token_ids[okay_list_idx]):
                         sample_output_token = okay_token_ids[okay_list_idx][offset]
                         sample_logprobs = {sample_output_token:Logprob(logprob=math.log(custom_token_probs))}
@@ -275,6 +282,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     sampling_params,
                     lora_req=seq_group.lora_request,
                     is_summary_stage=True,
+                    summary_token_id=summary_token_ids[0] if summary_token_ids else None,
                 )
                 if seq.is_finished():
                     for scheduler in self.scheduler:

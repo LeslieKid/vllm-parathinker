@@ -100,10 +100,27 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<vllm_pad>")
     tokenizer.pad_token = "<vllm_pad>"
-    # Token IDs for <think1> ~ <think8>
-    think_token_ids = [151665, 151667, 151669, 151671, 151673, 151675, 151677, 151679]
+    
+    # Token IDs for parallel thinking tokens (<think1>, <think2>, etc.)
+    # These can be obtained dynamically from the tokenizer for model-agnostic support:
+    # For Qwen2.5: tokens are <think1> through <think8>
+    # For other models: use the model-specific token names
+    think_token_ids = []
+    for i in range(1, 9):  # <think1> through <think8>
+        token_name = f"<think{i}>"
+        try:
+            token_id = tokenizer.convert_tokens_to_ids(token_name)
+            if token_id != tokenizer.unk_token_id:
+                think_token_ids.append(token_id)
+        except Exception:
+            pass
+    
+    # Fallback to hardcoded Qwen2.5 token IDs if dynamic lookup fails
+    if not think_token_ids:
+        think_token_ids = [151665, 151667, 151669, 151671, 151673, 151675, 151677, 151679]
+    
     # The common tokens after think token
-    okay_token_ids = [[]] * 8
+    okay_token_ids = [[]] * len(think_token_ids)
     # template for summary part
     summary_token_ids = tokenizer.encode(
         "<summary>By analyzing multiple reasoning processes above, I concluded that: The final answer is",
