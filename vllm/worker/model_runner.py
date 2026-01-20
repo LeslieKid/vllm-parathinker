@@ -570,7 +570,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         summary_token_id = self.summary_token_id
         # Get cot_token_ids directly from the property (avoids repeated filtering)
         cot_token_ids = self.cot_token_ids
-        first_think_token_id = cot_token_ids[0] if cot_token_ids else None
+        first_think_token_id = cot_token_ids[0] if cot_token_ids and len(cot_token_ids) > 0 else None
         
         if len(seq_data.output_token_ids) > 0:
             first_output_token_id = seq_data.output_token_ids[0]

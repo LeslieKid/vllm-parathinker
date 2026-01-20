@@ -128,7 +128,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         # When a parallel thinking path accidentally generates a special token (like another cot token
         # or summary token), we replace it with a valid thinking token. We use the first cot token 
         # (e.g., <think1>) as the replacement since it's a valid token for this context.
-        replacement_think_token_id = cot_token_ids[0] if cot_token_ids else None
+        replacement_think_token_id = cot_token_ids[0] if cot_token_ids and len(cot_token_ids) > 0 else None
+        # Get the first summary token id for checking, None if not available
+        first_summary_token_id = summary_token_ids[0] if summary_token_ids and len(summary_token_ids) > 0 else None
         sampling_params = seq_group.sampling_params
         custom_token_probs = 0.99
 
@@ -180,7 +182,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     new_char_count,
                     sampling_params,
                     lora_req=seq_group.lora_request,
-                    summary_token_id=summary_token_ids[0] if summary_token_ids else None,
+                    summary_token_id=first_summary_token_id,
                 )
                 
             if not is_async and (not seq_group.is_think_stage_finished()):
@@ -191,7 +193,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     # Parallel thinking stage should not generate the special cot start token ids,
                     # if it occurs by accident (because of the randomness of sampling), replace it with a valid thinking token
                     if replacement_think_token_id is not None and \
-                       ((sample_output_token in cot_token_ids) or (sample_output_token == summary_token_ids[0])):
+                       ((sample_output_token in cot_token_ids) or (first_summary_token_id is not None and sample_output_token == first_summary_token_id)):
                         sample_output_token = replacement_think_token_id
                         sample_logprobs = {sample_output_token:Logprob(logprob=math.log(1-custom_token_probs))}
                         
@@ -241,15 +243,16 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                         for scheduler in self.scheduler:
                             scheduler.free_seq(seq)
                 # Determine that there is no summary token in the new sequence (Avoid encountering bug in the following `index()`)
-                assert new_seq.get_output_token_ids().count(summary_token_ids[0]) == 0
+                if first_summary_token_id is not None:
+                    assert new_seq.get_output_token_ids().count(first_summary_token_id) == 0
                 # Add new sequence for summary stage
                 seq_group.seqs.append(new_seq)
                 seq_group.seqs_dict[new_seq_id] = new_seq
                 seq_group.is_single_seq = len(seq_group.seqs) == 1
                 
                 # Custom special token id <summary> as the first token id in summary stage
-                sample = summary_token_ids[0]
-                if not is_async:
+                sample = first_summary_token_id
+                if not is_async and sample is not None:
                     logprobs = {sample:Logprob(logprob=math.log(custom_token_probs))}
                     seq_group.get_seqs()[-1].append_token_id(sample, logprobs=logprobs)
                     
@@ -262,9 +265,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 assert len(outputs.samples) == 1
                 seq = seq_group.seqs[-1]
                 assert (not is_async)
-                if not is_async:
+                if not is_async and first_summary_token_id is not None:
                     # `summary_token_ids` can be considered as specific template for summary stage
-                    summary_token_idx = seq.get_output_token_ids().index(summary_token_ids[0])
+                    summary_token_idx = seq.get_output_token_ids().index(first_summary_token_id)
                     offset = seq.get_output_len() - summary_token_idx
                     if offset < len(summary_token_ids):
                         output_token = summary_token_ids[offset]
@@ -284,7 +287,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     sampling_params,
                     lora_req=seq_group.lora_request,
                     is_summary_stage=True,
-                    summary_token_id=summary_token_ids[0] if summary_token_ids else None,
+                    summary_token_id=first_summary_token_id,
                 )
                 if seq.is_finished():
                     for scheduler in self.scheduler:
