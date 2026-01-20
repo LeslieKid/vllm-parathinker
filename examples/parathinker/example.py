@@ -134,7 +134,8 @@ def main():
     # Fallback to hardcoded Qwen2.5 stop token IDs if dynamic lookup fails
     if not stop_token_ids:
         warnings.warn("Using hardcoded Qwen2.5 stop token IDs as fallback.")
-        stop_token_ids = [151649, 151666, 151668, 151670, 151672, 151674, 151676, 151678, 151680, 151682]
+        # Token IDs for </think>, </think1> ~ </think8>, </summary>
+        stop_token_ids = [151649, 151666, 151668, 151670, 151672, 151674, 151676, 151678, 151680, 151682, 151684]
     
     # Create sampling params with dynamic stop token IDs
     sampling_params = SamplingParams(
