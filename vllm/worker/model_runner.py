@@ -577,12 +577,13 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # Summary stage
             if summary_token_id in seq_data.output_token_ids:
                 # In summary stage, first output token should be the first cot token
-                if first_think_token_id is not None:
+                # Skip this check if cot_token_ids is empty (which shouldn't happen in practice)
+                if first_think_token_id is not None and cot_token_ids:
                     assert first_output_token_id == first_think_token_id, \
                         f"Expected first output token to be {first_think_token_id}, got {first_output_token_id}"
                 assert len(inter_data.seq_ids) == 1
             # Parallel thinking stage
-            elif first_output_token_id in cot_token_ids:
+            elif cot_token_ids and first_output_token_id in cot_token_ids:
                 # Get the index of the cot token to determine which reasoning path this is
                 cot_idx = cot_token_ids.index(first_output_token_id)
             else:

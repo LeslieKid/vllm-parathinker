@@ -112,7 +112,8 @@ def main():
             token_id = tokenizer.convert_tokens_to_ids(token_name)
             if token_id != tokenizer.unk_token_id:
                 think_token_ids.append(token_id)
-        except Exception:
+        except (AttributeError, KeyError, ValueError):
+            # Token not found in vocabulary
             pass
     
     # Fallback to hardcoded Qwen2.5 token IDs if dynamic lookup fails

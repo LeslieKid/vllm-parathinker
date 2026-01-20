@@ -190,7 +190,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     
                     # Parallel thinking stage should not generate the special cot start token ids,
                     # if it occurs by accident (because of the randomness of sampling), replace it with a valid thinking token
-                    if (sample_output_token in cot_token_ids) or (sample_output_token == summary_token_ids[0]):
+                    if replacement_think_token_id is not None and \
+                       ((sample_output_token in cot_token_ids) or (sample_output_token == summary_token_ids[0])):
                         sample_output_token = replacement_think_token_id
                         sample_logprobs = {sample_output_token:Logprob(logprob=math.log(1-custom_token_probs))}
                         
