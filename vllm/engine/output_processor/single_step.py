@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-from typing import List
+from typing import List, Optional
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -81,6 +81,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput],
                         cot_token_ids: List[int],
+                        think_token_id: Optional[int],
                         okay_token_ids: List[List[int]],
                         summary_token_ids: List[int],
                         parthink_size: int,
@@ -101,7 +102,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         assert (len(outputs) == 1
                 ), f"{type(self)} does not support multiple outputs per step"
         return self._process_sequence_group_outputs(sequence_group, outputs[0],
-                                                    cot_token_ids, okay_token_ids, summary_token_ids, parthink_size, pad_token_id, is_async)
+                                                    cot_token_ids, think_token_id, okay_token_ids, summary_token_ids, parthink_size, pad_token_id, is_async)
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
@@ -120,15 +121,16 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput,
                                         cot_token_ids: List[int],
+                                        think_token_id: Optional[int],
                                         okay_token_ids: List[List[int]],
                                         summary_token_ids: List[int],
                                         parthink_size: int,
                                         pad_token_id: int,
                                         is_async: bool) -> None:
         # When a parallel thinking path accidentally generates a special token (like another cot token
-        # or summary token), we replace it with a valid thinking token. We use the first cot token 
-        # (e.g., <think1>) as the replacement since it's a valid token for this context.
-        replacement_think_token_id = cot_token_ids[0] if cot_token_ids else None
+        # or summary token), we replace it with the <think> token ID.
+        # think_token_id is the token ID for `<think>` which is different from cot_token_ids (<think1>, <think2>, etc.)
+        replacement_think_token_id = think_token_id
         # Get the first summary token id for checking, None if not available
         first_summary_token_id = summary_token_ids[0] if summary_token_ids else None
         sampling_params = seq_group.sampling_params
@@ -251,8 +253,10 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 seq_group.is_single_seq = len(seq_group.seqs) == 1
                 
                 # Custom special token id <summary> as the first token id in summary stage
+                assert first_summary_token_id is not None, \
+                    "first_summary_token_id must not be None when entering summary stage"
                 sample = first_summary_token_id
-                if not is_async and sample is not None:
+                if not is_async:
                     logprobs = {sample:Logprob(logprob=math.log(custom_token_probs))}
                     seq_group.get_seqs()[-1].append_token_id(sample, logprobs=logprobs)
                     

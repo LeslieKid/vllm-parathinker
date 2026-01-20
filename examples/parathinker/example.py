@@ -38,18 +38,6 @@ max_tokens = 1024 * 16
 parthink_size = 4
 assert max_tokens % block_size == 0
 
-# Token IDs for </think>, </think1> ~ </think8>, </summary>
-stop_token_ids = [151643, 151666, 151668, 151670, 151672, 151674, 151676, 151678, 151680, 151682, 151684]
-sampling_params = SamplingParams(
-    n=1,
-    temperature=0.5,
-    top_p=1.0,
-    max_tokens=max_tokens,
-    stop_token_ids=stop_token_ids,
-    # Add eos token in stop_token_ids
-    ignore_eos=True
-)
-
 # Append padding tokens
 def prompts_preprocess(tokenizer, block_size) -> list[str]:
     processed_prompts = []
@@ -124,6 +112,41 @@ def main():
                      "For other models, ensure the tokenizer has <think1> through <think8> tokens.")
         think_token_ids = [151665, 151667, 151669, 151671, 151673, 151675, 151677, 151679]
     
+    # Get <think> token ID (used as replacement when a reasoning path accidentally generates special tokens)
+    think_token_id = tokenizer.convert_tokens_to_ids("<think>")
+    if think_token_id == tokenizer.unk_token_id:
+        warnings.warn("Token '<think>' not found in tokenizer vocabulary, using fallback")
+        think_token_id = 151648  # Fallback to Qwen2.5 token ID
+    
+    # Get stop token IDs dynamically: </think>, </think1> ~ </think8>, </summary>
+    stop_token_ids = []
+    stop_token_names = ["</think>"] + [f"</think{i}>" for i in range(1, 9)] + ["</summary>"]
+    for token_name in stop_token_names:
+        try:
+            token_id = tokenizer.convert_tokens_to_ids(token_name)
+            if token_id != tokenizer.unk_token_id:
+                stop_token_ids.append(token_id)
+            else:
+                warnings.warn(f"Stop token '{token_name}' not found in tokenizer vocabulary")
+        except (AttributeError, KeyError, ValueError) as e:
+            warnings.warn(f"Failed to get token ID for '{token_name}': {e}")
+    
+    # Fallback to hardcoded Qwen2.5 stop token IDs if dynamic lookup fails
+    if not stop_token_ids:
+        warnings.warn("Using hardcoded Qwen2.5 stop token IDs as fallback.")
+        stop_token_ids = [151649, 151666, 151668, 151670, 151672, 151674, 151676, 151678, 151680, 151682]
+    
+    # Create sampling params with dynamic stop token IDs
+    sampling_params = SamplingParams(
+        n=1,
+        temperature=0.5,
+        top_p=1.0,
+        max_tokens=max_tokens,
+        stop_token_ids=stop_token_ids,
+        # Add eos token in stop_token_ids
+        ignore_eos=True
+    )
+    
     # The common tokens after think token
     okay_token_ids = [[]] * len(think_token_ids)
     # template for summary part
@@ -137,6 +160,7 @@ def main():
     sys.setrecursionlimit(50000)
     outputs = llm.generate(
         cot_token_ids=think_token_ids,
+        think_token_id=think_token_id,
         okay_token_ids=okay_token_ids,
         summary_token_ids=summary_token_ids,
         parthink_size=parthink_size,

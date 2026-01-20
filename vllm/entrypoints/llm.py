@@ -277,6 +277,7 @@ class LLM:
     def generate(
         self,
         cot_token_ids: Optional[list[int]] = None,
+        think_token_id: Optional[int] = None,
         okay_token_ids: Optional[list[list[int]]] = None,
         summary_token_ids: Optional[list[int]] = None,
         parthink_size: int = -1,
@@ -371,6 +372,7 @@ class LLM:
             priority=priority)
 
         self.llm_engine.cot_token_ids = cot_token_ids
+        self.llm_engine.think_token_id = think_token_id
         self.llm_engine.okay_token_ids = okay_token_ids
         self.llm_engine.summary_token_ids = summary_token_ids
         self.llm_engine.parthink_size = parthink_size
