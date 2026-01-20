@@ -570,15 +570,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         summary_token_id = self.summary_token_id
         # Get cot_token_ids directly from the property (avoids repeated filtering)
         cot_token_ids = self.cot_token_ids
-        first_think_token_id = cot_token_ids[0] if cot_token_ids and len(cot_token_ids) > 0 else None
+        first_think_token_id = cot_token_ids[0] if cot_token_ids else None
         
         if len(seq_data.output_token_ids) > 0:
             first_output_token_id = seq_data.output_token_ids[0]
             # Summary stage
             if summary_token_id in seq_data.output_token_ids:
                 # In summary stage, first output token should be the first cot token
-                # Skip this check if cot_token_ids is empty (which shouldn't happen in practice)
-                if first_think_token_id is not None and cot_token_ids:
+                if first_think_token_id is not None:
                     assert first_output_token_id == first_think_token_id, \
                         f"Expected first output token to be {first_think_token_id}, got {first_output_token_id}"
                 assert len(inter_data.seq_ids) == 1

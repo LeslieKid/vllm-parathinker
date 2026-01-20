@@ -3,6 +3,7 @@ from transformers import AutoTokenizer
 import json
 import sys
 import os
+import warnings
 
 os.environ["VLLM_USE_V1"] = "0" # V1 is not supported for ParaThinker
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"
@@ -112,12 +113,15 @@ def main():
             token_id = tokenizer.convert_tokens_to_ids(token_name)
             if token_id != tokenizer.unk_token_id:
                 think_token_ids.append(token_id)
-        except (AttributeError, KeyError, ValueError):
-            # Token not found in vocabulary
-            pass
+            else:
+                warnings.warn(f"Token '{token_name}' not found in tokenizer vocabulary (maps to unk_token)")
+        except (AttributeError, KeyError, ValueError) as e:
+            warnings.warn(f"Failed to get token ID for '{token_name}': {e}")
     
     # Fallback to hardcoded Qwen2.5 token IDs if dynamic lookup fails
     if not think_token_ids:
+        warnings.warn("Using hardcoded Qwen2.5 token IDs as fallback. "
+                     "For other models, ensure the tokenizer has <think1> through <think8> tokens.")
         think_token_ids = [151665, 151667, 151669, 151671, 151673, 151675, 151677, 151679]
     
     # The common tokens after think token

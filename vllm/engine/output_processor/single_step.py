@@ -128,9 +128,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         # When a parallel thinking path accidentally generates a special token (like another cot token
         # or summary token), we replace it with a valid thinking token. We use the first cot token 
         # (e.g., <think1>) as the replacement since it's a valid token for this context.
-        replacement_think_token_id = cot_token_ids[0] if cot_token_ids and len(cot_token_ids) > 0 else None
+        replacement_think_token_id = cot_token_ids[0] if cot_token_ids else None
         # Get the first summary token id for checking, None if not available
-        first_summary_token_id = summary_token_ids[0] if summary_token_ids and len(summary_token_ids) > 0 else None
+        first_summary_token_id = summary_token_ids[0] if summary_token_ids else None
         sampling_params = seq_group.sampling_params
         custom_token_probs = 0.99
 
