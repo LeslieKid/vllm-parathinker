@@ -482,6 +482,13 @@ class LlamaModel(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
+        
+        # Mark segment embeddings as "loaded" even though they're not from checkpoint
+        # (they are zero-initialized and trained during fine-tuning for parallel thinking)
+        for param_name in params_dict:
+            if "seg_embeddings.weight" in param_name:
+                loaded_params.add(param_name)
+        
         return loaded_params
 
 
